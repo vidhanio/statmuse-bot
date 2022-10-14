@@ -11,7 +11,6 @@ use std::{
 };
 
 use axum::{Extension, Router};
-use color_eyre::eyre;
 use futures::prelude::*;
 use reqwest::Client;
 use thiserror::Error;
@@ -29,6 +28,10 @@ pub enum Error {
     Twitter(#[from] twitter_v2::Error),
     #[error("reqwest error")]
     Reqwest(#[from] reqwest::Error),
+    #[error("sled error")]
+    Sled(#[from] sled::Error),
+    #[error("bincode error")]
+    Bincode(#[from] bincode::Error),
     #[error("other error")]
     Other(&'static str),
 }
@@ -84,7 +87,6 @@ async fn main() -> color_eyre::Result<()> {
             format!("http://{address}/callback").parse()?,
         ),
         db: sled::open("db")?,
-        token: None,
     }));
 
     let app = Router::new()
@@ -104,36 +106,46 @@ async fn main() -> color_eyre::Result<()> {
 
     time::sleep(time::Duration::from_secs(10)).await;
 
-    let twitter_api = TwitterApi::new(
-        ctx.lock()
-            .map_err(|_| eyre::eyre!("failed to lock ctx"))?
-            .token
-            .as_ref()
-            .ok_or_else(|| eyre::eyre!("no token found"))?
-            .clone(),
-    );
-
     let stream = stream_api.get_tweets_search_stream().stream().await?;
 
     stream
         .map_ok(|payload| payload.data)
         .for_each(|tweet| {
-            let twitter_api = twitter_api.clone();
+            let ctx = Arc::clone(&ctx);
             let http_client = http_client.clone();
 
             async move {
+                let ctx = ctx.lock().unwrap();
+
                 match tweet {
                     Ok(tweet) => {
                         if let Some(tweet) = tweet {
-                            match reply(&http_client, &twitter_api, tweet).await {
-                                Ok(Some(tweet)) => {
-                                    log::debug!("replied to tweet: {}", tweet.id);
+                            let token = ctx.token();
+                            match token {
+                                Some(mut token) => {
+                                    let refresh_result =
+                                        ctx.client.refresh_token_if_expired(&mut token).await;
+                                    match refresh_result {
+                                        Ok(true) => ctx.set_token(&token),
+                                        Ok(false) => {}
+                                        Err(e) => log::error!("error refreshing token: {e}"),
+                                    }
+                                    let twitter_api = TwitterApi::new(token);
+
+                                    match reply(&http_client, &twitter_api, tweet).await {
+                                        Ok(Some(tweet)) => {
+                                            log::debug!("replied to tweet with id: {}", tweet.id);
+                                        }
+                                        Ok(None) => {
+                                            log::warn!("no reply");
+                                        }
+                                        Err(e) => {
+                                            log::error!("failed to reply to tweet: {e:?}");
+                                        }
+                                    }
                                 }
-                                Ok(None) => {
-                                    log::warn!("no reply");
-                                }
-                                Err(e) => {
-                                    log::error!("failed to reply to tweet: {e:?}");
+                                None => {
+                                    log::error!("no token");
                                 }
                             }
                         } else {

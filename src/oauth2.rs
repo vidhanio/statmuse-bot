@@ -16,7 +16,56 @@ use twitter_v2::{
 pub struct Context {
     pub client: Oauth2Client,
     pub db: Db,
-    pub token: Option<Oauth2Token>,
+}
+
+impl Context {
+    pub fn token(&self) -> Option<Oauth2Token> {
+        self.db
+            .get("token")
+            .expect("should get token from db")
+            .map(|s| bincode::deserialize(&s).expect("should deserialize token"))
+    }
+
+    pub fn set_token(&self, token: &Oauth2Token) {
+        self.db
+            .insert(
+                "token",
+                bincode::serialize(token).expect("should serialize token"),
+            )
+            .expect("should insert token into db");
+    }
+
+    pub fn state(&self) -> Option<CsrfToken> {
+        self.db
+            .get("state")
+            .expect("should get state from db")
+            .map(|s| bincode::deserialize(&s).expect("should deserialize state"))
+    }
+
+    pub fn set_state(&self, state: &CsrfToken) {
+        self.db
+            .insert(
+                "state",
+                bincode::serialize(state).expect("should serialize state"),
+            )
+            .expect("should insert state into db");
+    }
+
+    pub fn verifier(&self) -> Option<PkceCodeVerifier> {
+        self.db
+            .get("verifier")
+            .expect("should get verifier from db")
+            .map(|s| bincode::deserialize(&s).expect("should deserialize verifier"))
+    }
+
+    pub fn set_verifier(&self, verifier: &PkceCodeVerifier) {
+        self.db
+            .insert(
+                "verifier",
+                bincode::serialize(verifier).expect("should serialize verifier"),
+            )
+            .expect("should insert verifier into db");
+    }
 }
 
 #[allow(clippy::unused_async)]
@@ -35,23 +84,9 @@ pub async fn login(Extension(ctx): Extension<Arc<Mutex<Context>>>) -> impl IntoR
         ],
     );
 
-    ctx.db
-        .insert("state", state.secret().as_str())
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to insert state into db",
-            )
-        })?;
+    ctx.set_state(&state);
 
-    ctx.db
-        .insert("verifier", verifier.secret().as_str())
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to insert verifier into db",
-            )
-        })?;
+    ctx.set_verifier(&verifier);
 
     Ok::<_, ErrorResponse>(Redirect::to(url.as_str()))
 }
@@ -67,45 +102,22 @@ pub async fn callback(
     Query(params): Query<CallbackParams>,
 ) -> impl IntoResponse {
     let (client, verifier) = {
-        let ctx = ctx
-            .lock()
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "failed to lock ctx"))?;
+        let ctx = ctx.lock().unwrap();
 
         let state = ctx
-            .db
-            .get("state")
-            .map_err(|_| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "failed to get state from db",
-                )
-            })?
-            .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "no state found"))?;
+            .state()
+            .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "state not found in db"))?;
 
-        if state != params.state.secret() {
+        if state.secret() != params.state.secret() {
             return Err((StatusCode::BAD_REQUEST, "invalid state").into());
         }
 
         let client = ctx.client.clone();
 
-        let verifier_bytes = ctx
-            .db
-            .get("verifier")
-            .map_err(|_| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "failed to get verifier from db",
-                )
-            })?
-            .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "no verifier found"))?;
-
-        let verifier =
-            PkceCodeVerifier::new(String::from_utf8(verifier_bytes.to_vec()).map_err(|_| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "failed to convert verifier to string",
-                )
-            })?);
+        let verifier = ctx.verifier().ok_or((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "verifier not found in db",
+        ))?;
 
         (client, verifier)
     };
@@ -116,11 +128,9 @@ pub async fn callback(
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "failed to request token"))?;
 
-    let mut ctx = ctx
-        .lock()
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "failed to lock ctx"))?;
+    let ctx = ctx.lock().unwrap();
 
-    ctx.token = Some(token);
+    ctx.set_token(&token);
 
     Ok::<_, ErrorResponse>(StatusCode::OK)
 }
