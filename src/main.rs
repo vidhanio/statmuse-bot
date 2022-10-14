@@ -5,6 +5,7 @@ mod oauth2;
 mod statmuse;
 
 use std::{
+    env,
     net::SocketAddr,
     sync::{Arc, Mutex},
 };
@@ -13,15 +14,30 @@ use axum::{Extension, Router};
 use color_eyre::eyre;
 use futures::prelude::*;
 use reqwest::Client;
+use thiserror::Error;
 use tokio::time;
+use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
-use twitter_v2::{authorization::Oauth2Client, ApiResponse, Authorization, Tweet, TwitterApi};
+use twitter_v2::{
+    authorization::{BearerToken, Oauth2Client},
+    ApiResponse, Authorization, Tweet, TwitterApi,
+};
+
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("twitter error")]
+    Twitter(#[from] twitter_v2::Error),
+    #[error("reqwest error")]
+    Reqwest(#[from] reqwest::Error),
+    #[error("other error")]
+    Other(&'static str),
+}
 
 async fn reply<A: Authorization + Send + Sync>(
     http_client: &Client,
     twitter_api: &TwitterApi<A>,
     tweet: Tweet,
-) -> eyre::Result<Option<Tweet>> {
+) -> Result<Option<Tweet>, Error> {
     let text = tweet.text.replace("@statmuse_bot", "").trim().to_string();
 
     let reply = statmuse::send_query(http_client, &text).await?;
@@ -41,33 +57,50 @@ async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
     dotenv::dotenv()?;
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(EnvFilter::new(
+            env::var("RUST_LOG").unwrap_or_else(|_| "statmuse_bot=debug,tower_http=debug".into()),
+        ))
         .init();
 
     let http_client = Client::new();
 
-    let address = SocketAddr::new([127, 0, 0, 1].into(), 8080);
+    let stream_api = TwitterApi::new(BearerToken::new(env::var("TWITTER_BEARER_TOKEN")?));
+
+    stream_api
+        .post_tweets_search_stream_rule()
+        .add_tagged(
+            "@statmuse_bot -is:retweet -from:statmuse_bot",
+            "mentions statmuse_bot",
+        )
+        .send()
+        .await?;
+
+    let address = SocketAddr::new([127, 0, 0, 1].into(), 3000);
 
     let ctx = Arc::new(Mutex::new(oauth2::Context {
         client: Oauth2Client::new(
-            std::env::var("TWITTER_CLIENT_ID")?,
-            std::env::var("TWITTER_CLIENT_SECRET")?,
+            env::var("TWITTER_CLIENT_ID")?,
+            env::var("TWITTER_CLIENT_SECRET")?,
             format!("http://{address}/callback").parse()?,
         ),
-        verifier: None,
-        state: None,
+        db: sled::open("db")?,
         token: None,
     }));
 
     let app = Router::new()
         .route("/callback", axum::routing::get(oauth2::callback))
         .route("/login", axum::routing::get(oauth2::login))
+        .layer(TraceLayer::new_for_http())
         .layer(Extension(Arc::clone(&ctx)));
 
-    log::debug!(address = address.to_string(); "serving app");
-    axum::Server::bind(&address)
-        .serve(app.into_make_service())
-        .await?;
+    tokio::spawn(async move {
+        axum::Server::bind(&address)
+            .serve(app.into_make_service())
+            .await
+            .unwrap();
+    });
+    log::debug!("serving app at: {address}");
+    println!("go to http://{address}/login");
 
     time::sleep(time::Duration::from_secs(10)).await;
 
@@ -80,7 +113,7 @@ async fn main() -> color_eyre::Result<()> {
             .clone(),
     );
 
-    let stream = twitter_api.get_tweets_search_stream().stream().await?;
+    let stream = stream_api.get_tweets_search_stream().stream().await?;
 
     stream
         .map_ok(|payload| payload.data)
@@ -94,13 +127,13 @@ async fn main() -> color_eyre::Result<()> {
                         if let Some(tweet) = tweet {
                             match reply(&http_client, &twitter_api, tweet).await {
                                 Ok(Some(tweet)) => {
-                                    log::debug!(tweet = tweet.id.as_u64(); "replied to tweet");
+                                    log::debug!("replied to tweet: {}", tweet.id);
                                 }
                                 Ok(None) => {
-                                    log::debug!("no reply");
+                                    log::warn!("no reply");
                                 }
-                                Err(err) => {
-                                    log::error!(err = err.to_string(); "failed to reply to tweet");
+                                Err(e) => {
+                                    log::error!("failed to reply to tweet: {e:?}");
                                 }
                             }
                         } else {
@@ -108,7 +141,7 @@ async fn main() -> color_eyre::Result<()> {
                         }
                     }
                     Err(e) => {
-                        log::error!(error = log::as_error!(e); "error while getting tweet");
+                        log::error!("error while getting tweet: {e:?}");
                     }
                 }
             }

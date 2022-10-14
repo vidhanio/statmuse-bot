@@ -7,6 +7,7 @@ use axum::{
     Extension,
 };
 use serde::Deserialize;
+use sled::Db;
 use twitter_v2::{
     authorization::{Oauth2Client, Oauth2Token, Scope},
     oauth2::{AuthorizationCode, CsrfToken, PkceCodeChallenge, PkceCodeVerifier},
@@ -14,25 +15,45 @@ use twitter_v2::{
 
 pub struct Context {
     pub client: Oauth2Client,
-    pub verifier: Option<PkceCodeVerifier>,
-    pub state: Option<CsrfToken>,
+    pub db: Db,
     pub token: Option<Oauth2Token>,
 }
 
 #[allow(clippy::unused_async)]
 pub async fn login(Extension(ctx): Extension<Arc<Mutex<Context>>>) -> impl IntoResponse {
-    let mut ctx = ctx.lock().unwrap();
+    let ctx = ctx.lock().unwrap();
 
     let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
 
-    let (url, state) = ctx
-        .client
-        .auth_url(challenge, [Scope::TweetRead, Scope::TweetWrite]);
+    let (url, state) = ctx.client.auth_url(
+        challenge,
+        [
+            Scope::TweetRead,
+            Scope::TweetWrite,
+            Scope::UsersRead,
+            Scope::OfflineAccess,
+        ],
+    );
 
-    ctx.verifier = Some(verifier);
-    ctx.state = Some(state);
+    ctx.db
+        .insert("state", state.secret().as_str())
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to insert state into db",
+            )
+        })?;
 
-    Redirect::to(url.as_str())
+    ctx.db
+        .insert("verifier", verifier.secret().as_str())
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to insert verifier into db",
+            )
+        })?;
+
+    Ok::<_, ErrorResponse>(Redirect::to(url.as_str()))
 }
 
 #[derive(Deserialize)]
@@ -46,29 +67,50 @@ pub async fn callback(
     Query(params): Query<CallbackParams>,
 ) -> impl IntoResponse {
     let (client, verifier) = {
-        let mut ctx = ctx
+        let ctx = ctx
             .lock()
             .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "failed to lock ctx"))?;
 
         let state = ctx
-            .state
-            .take()
+            .db
+            .get("state")
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "failed to get state from db",
+                )
+            })?
             .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "no state found"))?;
 
-        if state.secret() != params.state.secret() {
+        if state != params.state.secret() {
             return Err((StatusCode::BAD_REQUEST, "invalid state").into());
         }
 
-        let client = Oauth2Client::clone(&ctx.client);
+        let client = ctx.client.clone();
 
-        let verifier = ctx
-            .verifier
-            .take()
+        let verifier_bytes = ctx
+            .db
+            .get("verifier")
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "failed to get verifier from db",
+                )
+            })?
             .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "no verifier found"))?;
+
+        let verifier =
+            PkceCodeVerifier::new(String::from_utf8(verifier_bytes.to_vec()).map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "failed to convert verifier to string",
+                )
+            })?);
 
         (client, verifier)
     };
 
+    // TODO: broken
     let token = client
         .request_token(params.code, verifier)
         .await
@@ -80,5 +122,5 @@ pub async fn callback(
 
     ctx.token = Some(token);
 
-    Ok::<_, ErrorResponse>(Redirect::to("https://twitter.com"))
+    Ok::<_, ErrorResponse>(StatusCode::OK)
 }

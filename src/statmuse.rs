@@ -1,13 +1,14 @@
-use color_eyre::eyre;
 use reqwest::Client;
 use scraper::{Html, Selector};
 
-pub async fn send_query(client: &Client, query: &str) -> color_eyre::Result<String> {
+use crate::Error;
+
+pub async fn send_query(client: &Client, query: &str) -> Result<String, Error> {
     let url = format!("https://www.statmuse.com/nba/ask/{query}");
 
     let html = client.get(&url).send().await?.text().await?;
 
-    log::debug!(url = url.as_str(); "html obtained from url");
+    log::debug!("html obtained from url: {url}");
 
     let answer = Html::parse_document(&html)
         .select(
@@ -15,11 +16,11 @@ pub async fn send_query(client: &Client, query: &str) -> color_eyre::Result<Stri
             .expect("selector should be valid")
         )
         .next()
-        .ok_or_else(|| eyre::eyre!("no answer found in html"))?
+        .ok_or(Error::Other("no answer found in html"))?
         .text()
         .collect::<String>();
 
-    log::debug!(url = url, answer = answer; "answer obtained");
+    log::debug!("answer obtained: {answer}");
 
     Ok(answer)
 }
