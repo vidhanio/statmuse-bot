@@ -13,6 +13,8 @@ use twitter_v2::{
     oauth2::{AuthorizationCode, CsrfToken, PkceCodeChallenge, PkceCodeVerifier},
 };
 
+use crate::Error;
+
 pub struct Context {
     pub client: Oauth2Client,
     pub db: Db,
@@ -33,6 +35,24 @@ impl Context {
                 bincode::serialize(token).expect("should serialize token"),
             )
             .expect("should insert token into db");
+    }
+
+    pub async fn refresh_token(&self) -> Result<Option<Oauth2Token>, Error> {
+        if let Some(mut token) = self.token() {
+            self.client
+                .refresh_token_if_expired(&mut token)
+                .await
+                .map(|refreshed| {
+                    if refreshed {
+                        self.set_token(&token);
+                    }
+
+                    Some(token)
+                })
+                .map_err(Into::into)
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn state(&self) -> Option<CsrfToken> {

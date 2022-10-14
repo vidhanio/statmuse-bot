@@ -3,6 +3,7 @@
 
 mod oauth2;
 mod statmuse;
+mod twitter;
 
 use std::{
     env,
@@ -14,12 +15,11 @@ use axum::{Extension, Router};
 use futures::prelude::*;
 use reqwest::Client;
 use thiserror::Error;
-use tokio::time;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 use twitter_v2::{
     authorization::{BearerToken, Oauth2Client},
-    ApiResponse, Authorization, Tweet, TwitterApi,
+    TwitterApi,
 };
 
 #[derive(Error, Debug)]
@@ -34,25 +34,6 @@ pub enum Error {
     Bincode(#[from] bincode::Error),
     #[error("other error")]
     Other(&'static str),
-}
-
-async fn reply<A: Authorization + Send + Sync>(
-    http_client: &Client,
-    twitter_api: &TwitterApi<A>,
-    tweet: Tweet,
-) -> Result<Option<Tweet>, Error> {
-    let text = tweet.text.replace("@statmuse_bot", "").trim().to_string();
-
-    let reply = statmuse::send_query(http_client, &text).await?;
-
-    twitter_api
-        .post_tweet()
-        .in_reply_to_tweet_id(tweet.id)
-        .text(reply)
-        .send()
-        .await
-        .map(ApiResponse::into_data)
-        .map_err(Into::into)
 }
 
 #[tokio::main]
@@ -104,8 +85,6 @@ async fn main() -> color_eyre::Result<()> {
     log::debug!("serving app at: {address}");
     println!("go to http://{address}/login");
 
-    time::sleep(time::Duration::from_secs(10)).await;
-
     let stream = stream_api.get_tweets_search_stream().stream().await?;
 
     stream
@@ -120,19 +99,12 @@ async fn main() -> color_eyre::Result<()> {
                 match tweet {
                     Ok(tweet) => {
                         if let Some(tweet) = tweet {
-                            let token = ctx.token();
+                            let token = ctx.refresh_token().await;
                             match token {
-                                Some(mut token) => {
-                                    let refresh_result =
-                                        ctx.client.refresh_token_if_expired(&mut token).await;
-                                    match refresh_result {
-                                        Ok(true) => ctx.set_token(&token),
-                                        Ok(false) => {}
-                                        Err(e) => log::error!("error refreshing token: {e}"),
-                                    }
+                                Ok(Some(token)) => {
                                     let twitter_api = TwitterApi::new(token);
 
-                                    match reply(&http_client, &twitter_api, tweet).await {
+                                    match twitter::reply(&http_client, &twitter_api, &tweet).await {
                                         Ok(Some(tweet)) => {
                                             log::debug!("replied to tweet with id: {}", tweet.id);
                                         }
@@ -144,8 +116,11 @@ async fn main() -> color_eyre::Result<()> {
                                         }
                                     }
                                 }
-                                None => {
+                                Ok(None) => {
                                     log::error!("no token");
+                                }
+                                Err(e) => {
+                                    log::error!("failed to refresh token: {e:?}");
                                 }
                             }
                         } else {

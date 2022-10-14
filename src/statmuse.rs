@@ -3,24 +3,34 @@ use scraper::{Html, Selector};
 
 use crate::Error;
 
-pub async fn send_query(client: &Client, query: &str) -> Result<String, Error> {
+pub async fn send_query(client: &Client, query: &str) -> Result<(String, String), Error> {
     let url = format!("https://www.statmuse.com/nba/ask/{query}");
 
     let html = client.get(&url).send().await?.text().await?;
 
     log::debug!("html obtained from url: {url}");
 
+    // <meta name="description" content="ANSWER_HERE">
     let answer = Html::parse_document(&html)
-        .select(
-            &Selector::parse(r"body > div.main-layout.mb-5.bg-team-primary.text-team-secondary > div > div.flex-1.flex.flex-col.justify-between.text-center.md\:text-left > h1 > p")
-            .expect("selector should be valid")
-        )
+        .select(&Selector::parse(r"meta[name=description]").expect("should parse selector"))
         .next()
-        .ok_or(Error::Other("no answer found in html"))?
-        .text()
-        .collect::<String>();
+        .expect("should have a meta description tag")
+        .value()
+        .attr("content")
+        .expect("should have content")
+        .to_string();
 
-    log::debug!("answer obtained: {answer}");
+    // <meta property="og:image" content="IMAGE_HERE">
+    let image = Html::parse_document(&html)
+        .select(&Selector::parse(r"meta[property=og\:image]").expect("should parse selector"))
+        .next()
+        .expect("should have a meta og:image tag")
+        .value()
+        .attr("content")
+        .expect("should have content")
+        .to_string();
 
-    Ok(answer)
+    log::debug!("answer and image obtained: {answer}");
+
+    Ok((answer, image))
 }
