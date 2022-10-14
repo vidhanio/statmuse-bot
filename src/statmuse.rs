@@ -25,7 +25,7 @@ pub async fn send_query(client: &Client, query: &str) -> Result<(String, String)
         .value()
         .attr("content")
         .expect("should have content")
-        .to_string();
+        .to_owned();
 
     log::debug!("answer obtained: {answer}");
 
