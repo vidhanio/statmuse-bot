@@ -18,7 +18,7 @@ pub async fn reply<A: Authorization + Send + Sync>(
     let re = regex!(r"\.?@(\w){1,15}");
     let text = re.replace_all(&tweet.text, "").trim().to_owned();
 
-    let (reply, _) = statmuse::send_query(http_client, &text).await?;
+    let reply = statmuse::send_query(http_client, &text).await?;
 
     twitter_api
         .post_tweet()

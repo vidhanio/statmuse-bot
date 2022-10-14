@@ -3,8 +3,8 @@ use scraper::{Html, Selector};
 
 use crate::Error;
 
-pub async fn send_query(client: &Client, query: &str) -> Result<(String, String), Error> {
-    let url = format!("https://www.statmuse.com/nba/ask/{query}");
+pub async fn send_query(client: &Client, query: &str) -> Result<String, Error> {
+    let url = format!("https://www.statmuse.com/nba/ask?q={query}");
 
     let html = client.get(&url).send().await?.text().await?;
 
@@ -13,21 +13,9 @@ pub async fn send_query(client: &Client, query: &str) -> Result<(String, String)
     let answer = Html::parse_document(&html)
         .select(&Selector::parse(r"h1").expect("should parse selector"))
         .next()
-        .expect("should have h1")
+        .ok_or(Error::Other("no h1 element found"))?
         .text()
         .collect::<String>();
 
-    // <meta property="og:image" content="IMAGE_HERE">
-    let image = Html::parse_document(&html)
-        .select(&Selector::parse(r"meta[property=og\:image]").expect("should parse selector"))
-        .next()
-        .expect("should have a meta og:image tag")
-        .value()
-        .attr("content")
-        .expect("should have content")
-        .to_owned();
-
-    log::debug!("answer obtained: {answer}");
-
-    Ok((answer, image))
+    Ok(answer)
 }
