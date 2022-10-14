@@ -39,7 +39,7 @@ pub enum Error {
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
-    dotenv::dotenv()?;
+    drop(dotenv::dotenv());
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::new(
             env::var("RUST_LOG").unwrap_or_else(|_| "statmuse_bot=debug,tower_http=debug".into()),
@@ -59,15 +59,16 @@ async fn main() -> color_eyre::Result<()> {
         .send()
         .await?;
 
-    let address = SocketAddr::new([127, 0, 0, 1].into(), 3000);
+    let address = SocketAddr::new([0, 0, 0, 0, 0, 0, 0, 0].into(), env::var("PORT")?.parse()?);
 
+    let url = env::var("URL")?;
     let ctx = Arc::new(Mutex::new(oauth2::Context {
         client: Oauth2Client::new(
             env::var("TWITTER_CLIENT_ID")?,
             env::var("TWITTER_CLIENT_SECRET")?,
-            format!("http://{address}/callback").parse()?,
+            format!("{url}/callback").parse()?,
         ),
-        db: sled::open("db")?,
+        db: sled::open("/data")?,
     }));
 
     let app = Router::new()
@@ -82,8 +83,8 @@ async fn main() -> color_eyre::Result<()> {
             .await
             .unwrap();
     });
-    log::debug!("serving app at: {address}");
-    println!("go to http://{address}/login");
+    log::debug!("serving app at: {url}");
+    println!("go to {url}/login");
 
     let stream = stream_api.get_tweets_search_stream().stream().await?;
 
